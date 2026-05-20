@@ -25,6 +25,10 @@
  * 0x02 — May 2026: sensor_packet_t replaced by sensor_v2_packet_t (8 bytes)
  *         with sensor_type discriminator; UDP $XDR transport removed from hub.
  *         All three firmwares (hub, remote, sensor-node) must match.
+ * 0x03 — May 2026: device_id renamed to channel in sensor_v2_packet_t (same
+ *         wire size, same position). Hub now routes by ESP-NOW sender MAC
+ *         instead of device_id, removing the USB serial config step.
+ *         channel is reserved for future multi-sensor boards (send 0 for now).
  */
 
 #include <stdint.h>
@@ -34,7 +38,7 @@
 // Increment when packet structures change. All nodes on the
 // same network must use the same version.
 // ============================================================
-#define PROTOCOL_VERSION        0x02
+#define PROTOCOL_VERSION        0x03
 
 // ============================================================
 // MAGIC BYTES — channel probe / beacon packet identification
@@ -131,6 +135,10 @@ typedef enum : uint8_t {
 // 8 bytes. Size is distinct from remote_packet_t (5) and
 // channel_probe_t (4) so the hub RX callback dispatches by length.
 //
+// Hub routing: the hub identifies this node by the ESP-NOW sender MAC
+// address provided by the radio hardware — NOT by the channel field.
+// channel is reserved for future boards with multiple sensors; send 0.
+//
 // value units by sensor_type:
 //   TANK     0..32767 mm        (DS1603L max ~5 m)
 //   TEMP   -32768..32767 centi-°C  (-327.68..327.67 °C)
@@ -139,7 +147,7 @@ typedef enum : uint8_t {
 // ============================================================
 typedef struct __attribute__((packed)) {
     uint8_t  protocol_version;   // must match PROTOCOL_VERSION
-    uint8_t  device_id;          // 0-based; maps to SensorConfig.deviceId in hub NVS
+    uint8_t  channel;            // reserved; always 0 (was device_id in v0.02)
     uint8_t  sensor_type;        // sensor_type_t
     int16_t  value;              // units per sensor_type (signed)
     uint8_t  battery_pct;        // 0–100; 100 for wired nodes
