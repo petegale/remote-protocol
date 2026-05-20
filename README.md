@@ -1,6 +1,6 @@
 # remote-protocol
 
-Shared ESP-NOW wire-format header for the yacht electronics suite:
+Shared ESP-NOW wire-format header for the navigation and sensor electronics suite:
 
 | Repo | Role |
 |---|---|
