@@ -156,6 +156,21 @@ typedef struct __attribute__((packed)) {
 } sensor_v2_packet_t;
 
 // ============================================================
+// WIRE-FORMAT SIZE GUARDS
+// The hub's ESP-NOW RX callback dispatches purely by packet length
+// (4 = probe, 5 = remote, 8 = sensor). If any struct changes size —
+// a reordered field, a wider type, or padding creeping in despite the
+// packed attribute — that dispatch silently misroutes packets with no
+// compile error in the consuming firmware. These asserts turn such a
+// regression into a build failure in all three repos at once.
+// ============================================================
+#ifdef __cplusplus
+static_assert(sizeof(channel_probe_t)   == 4, "channel_probe_t must stay 4 bytes (hub length-dispatch)");
+static_assert(sizeof(remote_packet_t)    == 5, "remote_packet_t must stay 5 bytes (hub length-dispatch)");
+static_assert(sizeof(sensor_v2_packet_t) == 8, "sensor_v2_packet_t must stay 8 bytes (hub length-dispatch)");
+#endif
+
+// ============================================================
 // BATTERY THRESHOLDS
 // ============================================================
 #define BATT_PCT_LOW            20      // warn user
