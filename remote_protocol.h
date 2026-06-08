@@ -29,6 +29,13 @@
  *         wire size, same position). Hub now routes by ESP-NOW sender MAC
  *         instead of device_id, removing the USB serial config step.
  *         channel is reserved for future multi-sensor boards (send 0 for now).
+ * 0x04 — Jun 2026: added SENSOR_TYPE_TANK_RESISTIVE (0x06) for resistive-sender
+ *         tank nodes (typically water tanks with a wirewound float-arm sender).
+ *         value = raw 12-bit ADC counts (0..4095). Same packet shape and length
+ *         as SENSOR_TYPE_TANK; hub feeds counts through the same per-slot
+ *         calibration interpolation as wired ADC tanks. No struct changes —
+ *         a 0x03 node still parses correctly at a 0x04 hub and vice versa,
+ *         but a 0x03 hub will not know how to interpret the new type code.
  */
 
 #include <stdint.h>
@@ -38,7 +45,7 @@
 // Increment when packet structures change. All nodes on the
 // same network must use the same version.
 // ============================================================
-#define PROTOCOL_VERSION        0x03
+#define PROTOCOL_VERSION        0x04
 
 // ============================================================
 // MAGIC BYTES — channel probe / beacon packet identification
@@ -122,12 +129,16 @@ typedef struct __attribute__((packed)) {
 // The `value` field is interpreted per type — see each entry.
 // ============================================================
 typedef enum : uint8_t {
-    SENSOR_TYPE_NONE     = 0x00,
-    SENSOR_TYPE_TANK     = 0x01,  // value = level in mm (raw DS1603L distance)
-    SENSOR_TYPE_TEMP     = 0x02,  // value = centidegrees C  (2150 = 21.50 C)
-    SENSOR_TYPE_RPM      = 0x03,  // value = revolutions per minute
-    SENSOR_TYPE_VOLTAGE  = 0x04,  // value = centivolts (1280 = 12.80 V)  [reserved]
-    SENSOR_TYPE_PRESSURE = 0x05,  // value = kPa                          [reserved]
+    SENSOR_TYPE_NONE           = 0x00,
+    SENSOR_TYPE_TANK           = 0x01,  // value = level in mm (raw DS1603L distance)
+    SENSOR_TYPE_TEMP           = 0x02,  // value = centidegrees C  (2150 = 21.50 C)
+    SENSOR_TYPE_RPM            = 0x03,  // value = revolutions per minute
+    SENSOR_TYPE_VOLTAGE        = 0x04,  // value = centivolts (1280 = 12.80 V)  [reserved]
+    SENSOR_TYPE_PRESSURE       = 0x05,  // value = kPa                          [reserved]
+    SENSOR_TYPE_TANK_RESISTIVE = 0x06,  // value = raw 12-bit ADC counts (0..4095)
+                                        // resistive-sender tank (water/grey/etc).
+                                        // Hub maps counts→% via per-slot calibration,
+                                        // same path as wired ADC tanks.
 } sensor_type_t;
 
 // ============================================================
@@ -140,10 +151,11 @@ typedef enum : uint8_t {
 // channel is reserved for future boards with multiple sensors; send 0.
 //
 // value units by sensor_type:
-//   TANK     0..32767 mm        (DS1603L max ~5 m)
-//   TEMP   -32768..32767 centi-°C  (-327.68..327.67 °C)
-//   RPM      0..32767 rpm
-//   VOLTAGE  0..32767 centivolts
+//   TANK             0..32767 mm        (DS1603L max ~5 m)
+//   TEMP           -32768..32767 centi-°C  (-327.68..327.67 °C)
+//   RPM              0..32767 rpm
+//   VOLTAGE          0..32767 centivolts
+//   TANK_RESISTIVE      0..4095 raw 12-bit ADC counts
 // ============================================================
 typedef struct __attribute__((packed)) {
     uint8_t  protocol_version;   // must match PROTOCOL_VERSION
