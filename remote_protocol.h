@@ -36,6 +36,19 @@
  *         calibration interpolation as wired ADC tanks. No struct changes —
  *         a 0x03 node still parses correctly at a 0x04 hub and vice versa,
  *         but a 0x03 hub will not know how to interpret the new type code.
+ * 0x05 — Jun 2026: AES-128 CCMP encryption for all unicast ESP-NOW links.
+ *         Breaking changes:
+ *         • Hub responds to probes with probe_response_t (20 bytes, includes LMK)
+ *           instead of re-using channel_probe_t (4 bytes).
+ *         • Added hub_response_t (3 bytes) for hub→device responses (UNPAIR).
+ *         • Hub only responds to probes from paired devices OR when in
+ *           user-initiated pairing mode (60 s window). All unicast links use
+ *           AES-128 CCMP via esp_now_add_peer() with a per-link LMK generated
+ *           by the hub during pairing. LMK is transmitted in the clear during
+ *           the probe exchange; physical proximity is the security model.
+ *         • Hub MAC allowlist: commands from non-paired remotes are dropped;
+ *           sensor data from unconfigured MACs are dropped outside pairing mode.
+ *         • ESPNOW_PMK must be set on all devices via esp_now_set_pmk().
  */
 
 #include <stdint.h>
@@ -45,7 +58,25 @@
 // Increment when packet structures change. All nodes on the
 // same network must use the same version.
 // ============================================================
-#define PROTOCOL_VERSION        0x04
+#define PROTOCOL_VERSION        0x05
+
+// ============================================================
+// ESP-NOW ENCRYPTION
+// Fixed PMK shared by all devices in a network.  The actual
+// per-link session key is derived from PMK + per-peer LMK.
+// LMK is generated randomly by the hub during pairing and
+// transmitted in the clear in probe_response_t.
+// All devices must call esp_now_set_pmk(ESPNOW_PMK) after
+// esp_now_init() and before adding any encrypted peer.
+// ============================================================
+#define ESPNOW_PMK { \
+  0x6e,0x61,0x76,0x5f,0x68,0x75,0x62, \
+  0x5f,0x76,0x30,0x35,0x5f,0x70,0x6d,0x6b,0x21 }
+
+// ============================================================
+// HUB RESPONSE FLAGS (hub_response_t.flags)
+// ============================================================
+#define HUB_RESP_FLAG_UNPAIR    0x01    // hub is revoking this device's pairing
 
 // ============================================================
 // MAGIC BYTES — channel probe / beacon packet identification
@@ -114,15 +145,44 @@ typedef struct __attribute__((packed)) {
 } remote_packet_t;
 
 // ============================================================
-// CHANNEL PROBE PACKET (broadcast during channel scan)
-// 4 bytes. Remote broadcasts on each channel; hub responds
-// on its current channel.
+// CHANNEL PROBE REQUEST (device → hub, broadcast during channel scan)
+// 4 bytes.  Devices broadcast on each channel; hub responds
+// with probe_response_t on its current channel.
 // ============================================================
 typedef struct __attribute__((packed)) {
     uint8_t     magic[2];           // PROBE_MAGIC_0, PROBE_MAGIC_1
-    uint8_t     type;               // PROBE_TYPE_REQUEST or PROBE_TYPE_RESPONSE
-    uint8_t     channel;            // 0 in request; hub's channel in response
+    uint8_t     type;               // PROBE_TYPE_REQUEST
+    uint8_t     channel;            // always 0 in request
 } channel_probe_t;
+
+// channel_probe_t is the REQUEST; the old alias is kept as-is for the hub's
+// length-dispatch (sizeof == 4).  Do NOT add fields — it would break dispatch.
+
+// ============================================================
+// PROBE RESPONSE (hub → device, unicast)
+// 20 bytes.  Hub sends this after receiving a channel_probe_t REQUEST.
+// In pairing mode: contains a freshly generated random LMK.
+// For re-probes from known devices: contains the previously stored LMK.
+// Devices must check: if lmk is non-zero, update stored LMK and re-register
+// the hub peer with encrypt=true; otherwise keep the existing LMK.
+// ============================================================
+typedef struct __attribute__((packed)) {
+    uint8_t     magic[2];           // PROBE_MAGIC_0, PROBE_MAGIC_1
+    uint8_t     type;               // PROBE_TYPE_RESPONSE
+    uint8_t     channel;            // hub's current WiFi channel
+    uint8_t     lmk[16];            // AES-128 CCMP LMK for this link
+} probe_response_t;
+
+// ============================================================
+// HUB RESPONSE PACKET (hub → device, unicast)
+// 3 bytes.  Sent by hub after processing a device command packet.
+// Currently used for UNPAIR (flag HUB_RESP_FLAG_UNPAIR).
+// Device listens for ≥ 20 ms after TX ACK to receive this.
+// ============================================================
+typedef struct __attribute__((packed)) {
+    uint8_t     magic[2];           // PROBE_MAGIC_0, PROBE_MAGIC_1
+    uint8_t     flags;              // HUB_RESP_FLAG_* bitmask
+} hub_response_t;
 
 // ============================================================
 // SENSOR TYPES (sensor_v2_packet_t.sensor_type)
@@ -169,17 +229,18 @@ typedef struct __attribute__((packed)) {
 
 // ============================================================
 // WIRE-FORMAT SIZE GUARDS
-// The hub's ESP-NOW RX callback dispatches purely by packet length
-// (4 = probe, 5 = remote, 8 = sensor). If any struct changes size —
-// a reordered field, a wider type, or padding creeping in despite the
-// packed attribute — that dispatch silently misroutes packets with no
-// compile error in the consuming firmware. These asserts turn such a
-// regression into a build failure in all three repos at once.
+// Hub RX dispatch table: 4 = probe_request (channel_probe_t),
+// 5 = remote command (remote_packet_t), 8 = sensor data (sensor_v2_packet_t).
+// Device RX dispatch: 20 = probe_response_t, 3 = hub_response_t.
+// If any struct changes size, dispatch silently misroutes packets —
+// these asserts turn that into a build failure across all three repos.
 // ============================================================
 #ifdef __cplusplus
-static_assert(sizeof(channel_probe_t)   == 4, "channel_probe_t must stay 4 bytes (hub length-dispatch)");
-static_assert(sizeof(remote_packet_t)    == 5, "remote_packet_t must stay 5 bytes (hub length-dispatch)");
-static_assert(sizeof(sensor_v2_packet_t) == 8, "sensor_v2_packet_t must stay 8 bytes (hub length-dispatch)");
+static_assert(sizeof(channel_probe_t)   ==  4, "channel_probe_t must stay 4 bytes (hub RX length-dispatch)");
+static_assert(sizeof(probe_response_t)  == 20, "probe_response_t must stay 20 bytes (device RX length-dispatch)");
+static_assert(sizeof(hub_response_t)    ==  3, "hub_response_t must stay 3 bytes (device RX length-dispatch)");
+static_assert(sizeof(remote_packet_t)    ==  5, "remote_packet_t must stay 5 bytes (hub RX length-dispatch)");
+static_assert(sizeof(sensor_v2_packet_t) ==  8, "sensor_v2_packet_t must stay 8 bytes (hub RX length-dispatch)");
 #endif
 
 // ============================================================
