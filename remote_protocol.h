@@ -49,6 +49,16 @@
  *         • Hub MAC allowlist: commands from non-paired remotes are dropped;
  *           sensor data from unconfigured MACs are dropped outside pairing mode.
  *         • ESPNOW_PMK must be set on all devices via esp_now_set_pmk().
+ * 0x06 — Jul 2026: added M5Paper display-node class (petegale/sensor-display).
+ *         Additive — existing v0.05 sensors and remotes continue to work
+ *         against a v0.06 hub without changes.
+ *         New packets:
+ *         • display_request_t  (6 bytes)  — display → hub, "send state now"
+ *         • display_state_t   (24 bytes)  — hub → display, tank levels +
+ *           UTC time (from NMEA2000 PGN 126992) + hub uptime
+ *         New hub pairing mode PAIRING_DISPLAY reuses the v0.05 probe → LMK →
+ *         encrypted-peer flow verbatim. Added FLAG_BATT_CHARGING (0x10) for
+ *         display battery state. No existing struct shape or size changed.
  */
 
 #include <stdint.h>
@@ -58,7 +68,7 @@
 // Increment when packet structures change. All nodes on the
 // same network must use the same version.
 // ============================================================
-#define PROTOCOL_VERSION        0x05
+#define PROTOCOL_VERSION        0x06
 
 // ============================================================
 // ESP-NOW ENCRYPTION
@@ -125,12 +135,14 @@ typedef enum : uint8_t {
 } command_t;
 
 // ============================================================
-// FLAG BITS (remote_packet_t.flags and sensor_v2_packet_t.flags)
+// FLAG BITS (remote_packet_t.flags, sensor_v2_packet_t.flags,
+// display_request_t.flags)
 // ============================================================
 #define FLAG_BATT_LOW           0x01    // battery <= 20%
 #define FLAG_BATT_CRITICAL      0x02    // battery <= 10%
 #define FLAG_TX_RETRY           0x04    // this is a retry attempt
 #define FLAG_CHANNEL_CHANGED    0x08    // remote had to rescan for channel
+#define FLAG_BATT_CHARGING      0x10    // (display_request_t) USB charging active
 
 // ============================================================
 // MAIN COMMAND PACKET (remote → hub)
@@ -228,12 +240,93 @@ typedef struct __attribute__((packed)) {
 } sensor_v2_packet_t;
 
 // ============================================================
+// DISPLAY NODE (M5Paper tank gauge — petegale/sensor-display)
+// Added in v0.06. The display is a pull client: it sleeps deeply
+// and wakes periodically to request current state from the hub.
+// ============================================================
+
+// Display sub-packet type codes (display_request_t.type, display_state_t.type).
+// Kept distinct from PROBE_TYPE_* so a future shared "type" dispatch
+// is unambiguous.
+#define DISPLAY_REQ_STATE       0x01    // "Send me current state"
+#define DISPLAY_RESP_STATE      0x02    // Hub response carrying state
+
+// Maximum tanks reported in a single state packet. Sized for the v1
+// M5Paper layout (two side-by-side tiles). Hub picks the first N
+// active tanks from g_tanks[] when populating the response.
+#define MAX_DISPLAY_TANKS       2
+
+// Fluid types for display_state_t.tanks[].fluid_type. Distinct from
+// sensor_type_t — these are presentation tags, not measurement
+// modalities. Hub maps the TankConfig.fluidType string ("fuel" / "water" /
+// "grey" / "black" / "oil" / "live-well") into one of these codes.
+#define DISPLAY_FLUID_FUEL      0x00
+#define DISPLAY_FLUID_WATER     0x01
+#define DISPLAY_FLUID_GREY      0x02
+#define DISPLAY_FLUID_BLACK     0x03
+#define DISPLAY_FLUID_OIL       0x04
+#define DISPLAY_FLUID_LIVEWELL  0x05
+
+// Sentinel level value meaning "no data" / "uncalibrated". Display
+// renders these tiles with "--" instead of a percentage and no
+// pale-grey fill.
+#define DISPLAY_LEVEL_NO_DATA   0xFF
+
+// Sentinels for utc_days / utc_seconds when the hub has not yet
+// received a System Time PGN (126992) on the NMEA2000 bus.
+#define DISPLAY_UTC_DAYS_NONE   0xFFFF
+
+// ============================================================
+// DISPLAY REQUEST (display → hub, unicast encrypted)
+// 6 bytes. Distinct from remote_packet_t (5) and channel_probe_t (4).
+// Hub dispatches on length 6 → build display_state_t and reply.
+// ============================================================
+typedef struct __attribute__((packed)) {
+    uint8_t     protocol_version;   // must match PROTOCOL_VERSION
+    uint8_t     type;               // DISPLAY_REQ_STATE
+    uint8_t     battery_pct;        // 0–100, display's current cell %
+    uint8_t     flags;              // FLAG_BATT_LOW, FLAG_BATT_CRITICAL,
+                                    // FLAG_BATT_CHARGING
+    uint8_t     sequence;           // rolling 0–255 for hub dedup
+    uint8_t     reserved;           // padding to 6 bytes (dispatch-distinct)
+} display_request_t;
+
+// ============================================================
+// DISPLAY STATE (hub → display, unicast encrypted)
+// 24 bytes. Distinct from probe_response_t (20) and hub_response_t (3).
+// Hub populates from current g_tanks[] state plus state.h UTC globals.
+// ============================================================
+typedef struct __attribute__((packed)) {
+    uint8_t     protocol_version;   // must match PROTOCOL_VERSION
+    uint8_t     type;               // DISPLAY_RESP_STATE
+    uint8_t     n_tanks;            // 0..MAX_DISPLAY_TANKS
+    uint8_t     flags;              // reserved for future health bits
+    uint32_t    hub_uptime_s;       // seconds since hub boot
+    uint16_t    utc_days;           // PGN 126992 days since 1970-01-01,
+                                    // or DISPLAY_UTC_DAYS_NONE if no GPS
+    float       utc_seconds;        // PGN 126992 seconds since midnight UTC
+    struct {
+        uint8_t fluid_type;         // DISPLAY_FLUID_*
+        uint8_t level_pct;          // 0..100, or DISPLAY_LEVEL_NO_DATA
+        uint8_t reserved[2];        // future expansion (capacity, etc.)
+    } tanks[MAX_DISPLAY_TANKS];     // = 4 × 2 = 8 bytes
+    uint8_t     reserved[2];        // pad to 24 bytes (length-dispatch
+                                    // distinct from probe_response_t=20)
+} display_state_t;
+
+// ============================================================
 // WIRE-FORMAT SIZE GUARDS
-// Hub RX dispatch table: 4 = probe_request (channel_probe_t),
-// 5 = remote command (remote_packet_t), 8 = sensor data (sensor_v2_packet_t).
-// Device RX dispatch: 20 = probe_response_t, 3 = hub_response_t.
+// Hub RX dispatch by length:
+//   4  = channel_probe_t      (any device → hub)
+//   5  = remote_packet_t      (remote → hub)
+//   6  = display_request_t    (display → hub, v0.06+)
+//   8  = sensor_v2_packet_t   (sensor → hub)
+// Device RX dispatch by length:
+//   3  = hub_response_t       (hub → any device)
+//   20 = probe_response_t     (hub → any device, post-probe)
+//   24 = display_state_t      (hub → display, v0.06+)
 // If any struct changes size, dispatch silently misroutes packets —
-// these asserts turn that into a build failure across all three repos.
+// these asserts turn that into a build failure across all repos.
 // ============================================================
 #ifdef __cplusplus
 static_assert(sizeof(channel_probe_t)   ==  4, "channel_probe_t must stay 4 bytes (hub RX length-dispatch)");
@@ -241,6 +334,8 @@ static_assert(sizeof(probe_response_t)  == 20, "probe_response_t must stay 20 by
 static_assert(sizeof(hub_response_t)    ==  3, "hub_response_t must stay 3 bytes (device RX length-dispatch)");
 static_assert(sizeof(remote_packet_t)    ==  5, "remote_packet_t must stay 5 bytes (hub RX length-dispatch)");
 static_assert(sizeof(sensor_v2_packet_t) ==  8, "sensor_v2_packet_t must stay 8 bytes (hub RX length-dispatch)");
+static_assert(sizeof(display_request_t)  ==  6, "display_request_t must stay 6 bytes (hub RX length-dispatch)");
+static_assert(sizeof(display_state_t)    == 24, "display_state_t must stay 24 bytes (device RX length-dispatch)");
 #endif
 
 // ============================================================
