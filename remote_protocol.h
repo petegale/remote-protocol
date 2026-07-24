@@ -49,6 +49,15 @@
  *         • Hub MAC allowlist: commands from non-paired remotes are dropped;
  *           sensor data from unconfigured MACs are dropped outside pairing mode.
  *         • ESPNOW_PMK must be set on all devices via esp_now_set_pmk().
+ * 0x07 — Jul 2026: house-battery telemetry in display_state_t (24 → 30
+ *         bytes). The hub listens to a Victron battery monitor's BLE
+ *         "Instant Readout" advertisements and forwards SoC / current /
+ *         voltage / charging state to the display in the same state
+ *         response. batt_soc_pct = DISPLAY_BATT_NO_DATA (0xFF) when no
+ *         Victron is configured or the reading is stale — displays fall
+ *         back to the tank-only layout. Breaking: version-checked packets
+ *         (display_request_t, display_state_t) require hub and display to
+ *         be flashed together. Sensor + remote packets unchanged.
  * 0x06 — Jul 2026: added M5Paper display-node class (petegale/sensor-display).
  *         Additive — existing v0.05 sensors and remotes continue to work
  *         against a v0.06 hub without changes.
@@ -68,7 +77,7 @@
 // Increment when packet structures change. All nodes on the
 // same network must use the same version.
 // ============================================================
-#define PROTOCOL_VERSION        0x06
+#define PROTOCOL_VERSION        0x07
 
 // ============================================================
 // ESP-NOW ENCRYPTION
@@ -276,6 +285,12 @@ typedef struct __attribute__((packed)) {
 // received a System Time PGN (126992) on the NMEA2000 bus.
 #define DISPLAY_UTC_DAYS_NONE   0xFFFF
 
+// House-battery sentinel + flags (v0.07). batt_soc_pct is set to
+// DISPLAY_BATT_NO_DATA when no Victron monitor is configured on the hub
+// or the last reading is stale; displays render the tank-only layout.
+#define DISPLAY_BATT_NO_DATA    0xFF
+#define DISPLAY_BATT_FLAG_CHARGING  0x01    // current into the bank
+
 // ============================================================
 // DISPLAY REQUEST (display → hub, unicast encrypted)
 // 6 bytes. Distinct from remote_packet_t (5) and channel_probe_t (4).
@@ -293,8 +308,9 @@ typedef struct __attribute__((packed)) {
 
 // ============================================================
 // DISPLAY STATE (hub → display, unicast encrypted)
-// 24 bytes. Distinct from probe_response_t (20) and hub_response_t (3).
-// Hub populates from current g_tanks[] state plus state.h UTC globals.
+// 30 bytes (v0.07; was 24 in v0.06). Distinct from probe_response_t (20)
+// and hub_response_t (3). Hub populates from current g_tanks[] state,
+// state.h UTC globals, and the Victron house-battery reading (if any).
 // ============================================================
 typedef struct __attribute__((packed)) {
     uint8_t     protocol_version;   // must match PROTOCOL_VERSION
@@ -310,7 +326,12 @@ typedef struct __attribute__((packed)) {
         uint8_t level_pct;          // 0..100, or DISPLAY_LEVEL_NO_DATA
         uint8_t reserved[2];        // future expansion (capacity, etc.)
     } tanks[MAX_DISPLAY_TANKS];     // = 4 × 2 = 8 bytes
-    uint8_t     reserved[2];        // pad to 24 bytes (length-dispatch
+    // House battery (v0.07) — from the hub's Victron BLE listener.
+    uint8_t     batt_soc_pct;       // 0..100 true SoC, or DISPLAY_BATT_NO_DATA
+    uint8_t     batt_flags;         // DISPLAY_BATT_FLAG_* bitmask
+    int16_t     batt_current_dA;    // deciamps; + = charging, − = discharging
+    uint16_t    batt_voltage_cV;    // centivolts (1261 = 12.61 V)
+    uint8_t     reserved[2];        // pad to 30 bytes (length-dispatch
                                     // distinct from probe_response_t=20)
 } display_state_t;
 
@@ -324,7 +345,7 @@ typedef struct __attribute__((packed)) {
 // Device RX dispatch by length:
 //   3  = hub_response_t       (hub → any device)
 //   20 = probe_response_t     (hub → any device, post-probe)
-//   24 = display_state_t      (hub → display, v0.06+)
+//   30 = display_state_t      (hub → display; 24 bytes in v0.06)
 // If any struct changes size, dispatch silently misroutes packets —
 // these asserts turn that into a build failure across all repos.
 // ============================================================
@@ -335,7 +356,7 @@ static_assert(sizeof(hub_response_t)    ==  3, "hub_response_t must stay 3 bytes
 static_assert(sizeof(remote_packet_t)    ==  5, "remote_packet_t must stay 5 bytes (hub RX length-dispatch)");
 static_assert(sizeof(sensor_v2_packet_t) ==  8, "sensor_v2_packet_t must stay 8 bytes (hub RX length-dispatch)");
 static_assert(sizeof(display_request_t)  ==  6, "display_request_t must stay 6 bytes (hub RX length-dispatch)");
-static_assert(sizeof(display_state_t)    == 24, "display_state_t must stay 24 bytes (device RX length-dispatch)");
+static_assert(sizeof(display_state_t)    == 30, "display_state_t must stay 30 bytes (device RX length-dispatch)");
 #endif
 
 // ============================================================
