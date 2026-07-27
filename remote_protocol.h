@@ -80,6 +80,46 @@
 #define PROTOCOL_VERSION        0x07
 
 // ============================================================
+// VERSION COMPATIBILITY — read this before bumping the version
+// ============================================================
+// PROTOCOL_VERSION is one constant, but the packet families it covers
+// have not all changed at the same time. Checking every inbound packet
+// for exact equality means a bump made for ONE family silently drops
+// traffic from every device that speaks the others.
+//
+// That is not hypothetical: the v0.07 bump — made purely to grow
+// display_state_t — meant a v0.07 hub dropped sensor data and remote
+// commands from v0.06 nodes, killing tank readings and the autopilot
+// buttons, with no diagnostic beyond silence.
+//
+// So each family declares the oldest version whose wire layout is still
+// identical to today's. Receivers accept anything from that floor
+// upward. Length-dispatch plus the static_asserts below are what
+// actually guarantee the layout; the floor guards *meaning*.
+//
+// RULE: if you change a packet's size, the length-dispatch handles it.
+// If you change what a field MEANS without changing the size, you must
+// raise that family's floor to the new version.
+#define SENSOR_PACKET_MIN_VERSION   0x02  // sensor_v2_packet_t: unchanged since v0.02
+#define REMOTE_PACKET_MIN_VERSION   0x02  // remote_packet_t:    unchanged since v0.02
+#define DISPLAY_PACKET_MIN_VERSION  0x07  // display packets grew a battery block in v0.07
+
+#ifdef __cplusplus
+// Pure predicates so receivers share one rule — and so it can be
+// unit-tested on the host, which is where this class of bug is cheapest
+// to catch.
+static inline bool sensor_packet_version_ok(uint8_t v) {
+    return v >= SENSOR_PACKET_MIN_VERSION;
+}
+static inline bool remote_packet_version_ok(uint8_t v) {
+    return v >= REMOTE_PACKET_MIN_VERSION;
+}
+static inline bool display_packet_version_ok(uint8_t v) {
+    return v >= DISPLAY_PACKET_MIN_VERSION;
+}
+#endif
+
+// ============================================================
 // ESP-NOW ENCRYPTION
 // Fixed PMK shared by all devices in a network.  The actual
 // per-link session key is derived from PMK + per-peer LMK.
