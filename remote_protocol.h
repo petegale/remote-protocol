@@ -391,6 +391,7 @@ typedef struct __attribute__((packed)) {
 // queued by the hub, so offline sensors, a sleeping remote and a
 // 15-minute-cycle display all collect it when they next transmit.
 // ============================================================
+#define OTA_MSG_INFO            0x06    // device → hub, unsolicited: this is what I am
 #define OTA_MSG_REQUEST         0x01    // device → hub: what have you got for me?
 #define OTA_MSG_OFFER           0x02    // hub → device: image metadata, or none
 #define OTA_MSG_CHUNK           0x03    // hub → device: payload
@@ -432,9 +433,16 @@ typedef struct __attribute__((packed)) {
 #define OTA_CHUNK_DATA_MAX      200
 
 // 47 bytes. Identity is asserted by the device, never inferred by the hub.
+//
+// Sent in two situations, distinguished by `type`:
+//   OTA_MSG_INFO     unsolicited, at boot and periodically. Lets the hub
+//                    know what every device is *before* anyone asks for an
+//                    update, which is what makes "click Update and the hub
+//                    fetches the right image" possible at all.
+//   OTA_MSG_REQUEST  in response to HUB_RESP_FLAG_UPDATE: ready to receive.
 typedef struct __attribute__((packed)) {
     uint8_t magic[2];                       // PROBE_MAGIC_0, PROBE_MAGIC_1
-    uint8_t type;                           // OTA_MSG_REQUEST
+    uint8_t type;                           // OTA_MSG_INFO | OTA_MSG_REQUEST
     uint8_t flags;                          // OTA_REQ_FLAG_*
     uint8_t board;                          // OTA_BOARD_*
     char    build_env[OTA_BUILD_ENV_LEN];   // manifest key, NUL-terminated
