@@ -136,6 +136,7 @@ static inline bool display_packet_version_ok(uint8_t v) {
 // HUB RESPONSE FLAGS (hub_response_t.flags)
 // ============================================================
 #define HUB_RESP_FLAG_UNPAIR    0x01    // hub is revoking this device's pairing
+#define HUB_RESP_FLAG_UPDATE    0x02    // a firmware update is waiting for you
 
 // ============================================================
 // MAGIC BYTES — channel probe / beacon packet identification
@@ -376,6 +377,108 @@ typedef struct __attribute__((packed)) {
 } display_state_t;
 
 // ============================================================
+// OTA — firmware update over ESP-NOW (any device class)
+// Full design: sensor_hub/SPEC-ota.md
+//
+// Deliberately NOT version-gated. Every struct below is keyed on the
+// probe magic bytes and carries no protocol_version field, because the
+// update path must keep working across future protocol changes — a
+// trigger that rode on a version-checked packet would be unreachable in
+// exactly the situation that needs it (see test_protocol_compat).
+//
+// The trigger itself is HUB_RESP_FLAG_UPDATE in the existing 3-byte
+// hub_response_t, which every device class already listens for. It is
+// queued by the hub, so offline sensors, a sleeping remote and a
+// 15-minute-cycle display all collect it when they next transmit.
+// ============================================================
+#define OTA_MSG_REQUEST         0x01    // device → hub: what have you got for me?
+#define OTA_MSG_OFFER           0x02    // hub → device: image metadata, or none
+#define OTA_MSG_CHUNK           0x03    // hub → device: payload
+#define OTA_MSG_ACK             0x04    // device → hub: next chunk wanted
+#define OTA_MSG_RESULT          0x05    // device → hub: applied / failed
+
+// Board identity. The hub must never guess: flashing a C3 image onto an
+// M5Atom, or a tank build onto an RPM node, would brick it.
+#define OTA_BOARD_UNKNOWN       0x00
+#define OTA_BOARD_M5ATOM        0x01
+#define OTA_BOARD_C3ZERO        0x02
+#define OTA_BOARD_M5PAPER       0x03
+#define OTA_BOARD_WAVESHARE43B  0x04
+#define OTA_BOARD_REMOTE_C6     0x05
+
+// ota_request_t.flags
+#define OTA_REQ_FLAG_CHARGING   0x01    // mains or charging — safe to update
+#define OTA_REQ_FLAG_BATTERY    0x02    // battery powered; respect charge-gating
+
+// ota_offer_t.flags
+#define OTA_OFFER_FLAG_NONE     0x01    // nothing suitable — stand down
+
+// ota_ack_t.state
+#define OTA_STATE_READY         0x00
+#define OTA_STATE_RECEIVING     0x01
+#define OTA_STATE_APPLIED       0x02    // written + verified, about to reboot
+#define OTA_STATE_FAILED        0x03
+#define OTA_STATE_DEFERRED      0x04    // battery too low; will retry when charged
+
+// ota_ack_t.error
+#define OTA_ERR_NONE            0x00
+#define OTA_ERR_BEGIN           0x01    // esp_ota_begin failed (image too big?)
+#define OTA_ERR_WRITE           0x02
+#define OTA_ERR_MD5             0x03    // integrity check failed — image discarded
+#define OTA_ERR_TIMEOUT         0x04
+
+#define OTA_BUILD_ENV_LEN       26      // "tank-ultrasonic-m5atom" + NUL, rounded
+#define OTA_VERSION_LEN         16
+#define OTA_CHUNK_DATA_MAX      200
+
+// 47 bytes. Identity is asserted by the device, never inferred by the hub.
+typedef struct __attribute__((packed)) {
+    uint8_t magic[2];                       // PROBE_MAGIC_0, PROBE_MAGIC_1
+    uint8_t type;                           // OTA_MSG_REQUEST
+    uint8_t flags;                          // OTA_REQ_FLAG_*
+    uint8_t board;                          // OTA_BOARD_*
+    char    build_env[OTA_BUILD_ENV_LEN];   // manifest key, NUL-terminated
+    char    fw_version[OTA_VERSION_LEN];    // what it is running right now
+} ota_request_t;
+
+// 44 bytes.
+typedef struct __attribute__((packed)) {
+    uint8_t  magic[2];
+    uint8_t  type;                          // OTA_MSG_OFFER
+    uint8_t  flags;                         // OTA_OFFER_FLAG_*
+    uint32_t image_size;
+    uint16_t chunk_count;
+    uint16_t chunk_size;
+    uint8_t  md5[16];                       // of the whole image
+    char     fw_version[OTA_VERSION_LEN];   // what is being offered
+} ota_offer_t;
+
+// 208 bytes, fixed even for a short final chunk so length-dispatch stays
+// trivial; `len` says how much of data[] is real.
+typedef struct __attribute__((packed)) {
+    uint8_t  magic[2];
+    uint8_t  type;                          // OTA_MSG_CHUNK
+    uint8_t  reserved;
+    uint16_t index;
+    uint16_t len;
+    uint8_t  data[OTA_CHUNK_DATA_MAX];
+} ota_chunk_t;
+
+// 10 bytes — deliberately not 8, which is sensor_v2_packet_t.
+// next_index drives both retry and resume: the hub simply sends whatever
+// the device asks for next, so a dropped chunk costs one round trip and a
+// device that reboots mid-transfer resumes instead of restarting.
+typedef struct __attribute__((packed)) {
+    uint8_t  magic[2];
+    uint8_t  type;                          // OTA_MSG_ACK | OTA_MSG_RESULT
+    uint8_t  state;                         // OTA_STATE_*
+    uint16_t next_index;
+    uint8_t  progress_pct;
+    uint8_t  error;                         // OTA_ERR_*
+    uint8_t  reserved[2];
+} ota_ack_t;
+
+// ============================================================
 // WIRE-FORMAT SIZE GUARDS
 // Hub RX dispatch by length:
 //   4  = channel_probe_t      (any device → hub)
@@ -397,6 +500,18 @@ static_assert(sizeof(remote_packet_t)    ==  5, "remote_packet_t must stay 5 byt
 static_assert(sizeof(sensor_v2_packet_t) ==  8, "sensor_v2_packet_t must stay 8 bytes (hub RX length-dispatch)");
 static_assert(sizeof(display_request_t)  ==  6, "display_request_t must stay 6 bytes (hub RX length-dispatch)");
 static_assert(sizeof(display_state_t)    == 30, "display_state_t must stay 30 bytes (device RX length-dispatch)");
+static_assert(sizeof(ota_request_t)      == 47, "ota_request_t must stay 47 bytes (hub RX length-dispatch)");
+static_assert(sizeof(ota_offer_t)        == 44, "ota_offer_t must stay 44 bytes (device RX length-dispatch)");
+static_assert(sizeof(ota_chunk_t)        == 208, "ota_chunk_t must stay 208 bytes (device RX length-dispatch)");
+static_assert(sizeof(ota_ack_t)          == 10, "ota_ack_t must stay 10 bytes (hub RX length-dispatch)");
+
+// Every dispatch length must be unique within its direction, or packets
+// silently misroute. These catch a collision at build time in all repos.
+static_assert(sizeof(ota_ack_t) != sizeof(sensor_v2_packet_t), "OTA ack collides with sensor packet");
+static_assert(sizeof(ota_request_t) != sizeof(sensor_v2_packet_t), "OTA request collides with sensor packet");
+static_assert(sizeof(ota_offer_t) != sizeof(display_state_t), "OTA offer collides with display state");
+static_assert(sizeof(ota_offer_t) != sizeof(probe_response_t), "OTA offer collides with probe response");
+static_assert(sizeof(ota_chunk_t) != sizeof(display_state_t), "OTA chunk collides with display state");
 #endif
 
 // ============================================================
