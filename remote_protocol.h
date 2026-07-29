@@ -515,11 +515,21 @@ typedef struct __attribute__((packed)) {
 #define HISTORY_MAX_POINTS 200
 #define HISTORY_POINT_GAP  0xFF   // no data in this bucket
 
+// Metrics are named, not positional. The hub's registry order depends on
+// which tank slots happen to be configured, so an index would quietly chart
+// the wrong quantity the moment a slot was added or removed. The hub
+// resolves these to whatever its registry currently holds.
+#define HIST_METRIC_TANK0        0
+#define HIST_METRIC_TANK1        1
+#define HIST_METRIC_BATT_SOC     2
+#define HIST_METRIC_BATT_CURRENT 3
+#define HIST_METRIC_BATT_VOLTAGE 4
+
 // 7 bytes — distinct from every other hub-inbound length (4/5/6/8/10/47).
 typedef struct __attribute__((packed)) {
     uint8_t magic[2];          // PROBE_MAGIC_0, PROBE_MAGIC_1
     uint8_t type;              // HIST_MSG_REQUEST
-    uint8_t metric_idx;        // index into the hub's metric list
+    uint8_t metric_idx;        // HIST_METRIC_* — named, not positional
     uint8_t window;            // HIST_WINDOW_*
     uint8_t n_points;          // requested, clamped to HISTORY_MAX_POINTS
     uint8_t sequence;          // rolling, for dedup
