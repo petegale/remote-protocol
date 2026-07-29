@@ -487,16 +487,84 @@ typedef struct __attribute__((packed)) {
 } ota_ack_t;
 
 // ============================================================
+// HISTORY QUERIES (display → hub → display)
+// ============================================================
+// Magic-keyed and never version-gated, exactly like the OTA set above.
+//
+// The spec drafted these as v0.08 packets, which would have forced every
+// display, the remote and every sensor to be reflashed in step with the hub
+// before any of them would speak again. Keying on magic instead makes the
+// feature purely additive: a device that knows nothing about history simply
+// never sends a 7-byte frame, and one that does can query a hub of any
+// version. PROTOCOL_VERSION is deliberately NOT bumped for this.
+//
+// A full-resolution series does not fit in ESP-NOW's 250-byte payload, so
+// the hub downsamples to exactly the number of points asked for and
+// normalises each to one byte against the min/max in the header. For
+// percentages that is lossless; for current it is ~0.4% of range, far finer
+// than any chart this hardware can draw.
+
+#define HIST_MSG_REQUEST   0x01
+#define HIST_MSG_RESPONSE  0x02
+
+// Windows map to the hub's retention tiers.
+#define HIST_WINDOW_24H    0x01   // T1, 60 s
+#define HIST_WINDOW_30D    0x02   // T2, 15 min
+#define HIST_WINDOW_1Y     0x03   // T3, 1 hour
+
+#define HISTORY_MAX_POINTS 200
+#define HISTORY_POINT_GAP  0xFF   // no data in this bucket
+
+// 7 bytes — distinct from every other hub-inbound length (4/5/6/8/10/47).
+typedef struct __attribute__((packed)) {
+    uint8_t magic[2];          // PROBE_MAGIC_0, PROBE_MAGIC_1
+    uint8_t type;              // HIST_MSG_REQUEST
+    uint8_t metric_idx;        // index into the hub's metric list
+    uint8_t window;            // HIST_WINDOW_*
+    uint8_t n_points;          // requested, clamped to HISTORY_MAX_POINTS
+    uint8_t sequence;          // rolling, for dedup
+} history_request_t;
+
+// 217 bytes, fixed even when n_points < 200, preserving length-dispatch.
+// Distinct from every device-inbound length (3/20/30/44/208).
+//
+// The spec said 216; this is 217 because magic[2] replaces the spec's
+// protocol_version byte, which is precisely what makes these packets
+// version-independent. The number itself carries no meaning — only its
+// uniqueness within device-inbound lengths does, which the asserts enforce.
+typedef struct __attribute__((packed)) {
+    uint8_t  magic[2];
+    uint8_t  type;                          // HIST_MSG_RESPONSE
+    uint8_t  metric_idx;
+    uint8_t  window;
+    uint8_t  n_points;                      // valid entries in points[]
+    uint8_t  flags;                         // reserved
+    int16_t  v_min;                         // raw units, for the client's Y axis
+    int16_t  v_max;
+    uint32_t newest_utc_s;                  // right edge; 0 if the hub has no clock
+    uint16_t interval_s;                    // seconds represented by each point
+    uint8_t  points[HISTORY_MAX_POINTS];    // 0..254 normalised, 0xFF = gap
+} history_response_t;
+
+// Reconstruct: v = v_min + point * (v_max - v_min) / 254
+static inline int16_t history_point_to_value(uint8_t p, int16_t vmin, int16_t vmax) {
+    if (p == HISTORY_POINT_GAP) return 0;
+    return (int16_t)(vmin + ((int32_t)p * (vmax - vmin)) / 254);
+}
+
+// ============================================================
 // WIRE-FORMAT SIZE GUARDS
 // Hub RX dispatch by length:
 //   4  = channel_probe_t      (any device → hub)
 //   5  = remote_packet_t      (remote → hub)
 //   6  = display_request_t    (display → hub, v0.06+)
+//   7  = history_request_t    (display → hub)
 //   8  = sensor_v2_packet_t   (sensor → hub)
 // Device RX dispatch by length:
 //   3  = hub_response_t       (hub → any device)
 //   20 = probe_response_t     (hub → any device, post-probe)
 //   30 = display_state_t      (hub → display; 24 bytes in v0.06)
+//   217 = history_response_t  (hub → display)
 // If any struct changes size, dispatch silently misroutes packets —
 // these asserts turn that into a build failure across all repos.
 // ============================================================
@@ -512,6 +580,8 @@ static_assert(sizeof(ota_request_t)      == 47, "ota_request_t must stay 47 byte
 static_assert(sizeof(ota_offer_t)        == 44, "ota_offer_t must stay 44 bytes (device RX length-dispatch)");
 static_assert(sizeof(ota_chunk_t)        == 208, "ota_chunk_t must stay 208 bytes (device RX length-dispatch)");
 static_assert(sizeof(ota_ack_t)          == 10, "ota_ack_t must stay 10 bytes (hub RX length-dispatch)");
+static_assert(sizeof(history_request_t)  ==  7, "history_request_t must stay 7 bytes (hub RX length-dispatch)");
+static_assert(sizeof(history_response_t) == 217, "history_response_t must stay 217 bytes (device RX length-dispatch)");
 
 // Every dispatch length must be unique within its direction, or packets
 // silently misroute. These catch a collision at build time in all repos.
@@ -520,6 +590,14 @@ static_assert(sizeof(ota_request_t) != sizeof(sensor_v2_packet_t), "OTA request 
 static_assert(sizeof(ota_offer_t) != sizeof(display_state_t), "OTA offer collides with display state");
 static_assert(sizeof(ota_offer_t) != sizeof(probe_response_t), "OTA offer collides with probe response");
 static_assert(sizeof(ota_chunk_t) != sizeof(display_state_t), "OTA chunk collides with display state");
+static_assert(sizeof(history_request_t) != sizeof(channel_probe_t), "history request collides with probe");
+static_assert(sizeof(history_request_t) != sizeof(sensor_v2_packet_t), "history request collides with sensor packet");
+static_assert(sizeof(history_request_t) != sizeof(display_request_t), "history request collides with display request");
+static_assert(sizeof(history_request_t) != sizeof(remote_packet_t), "history request collides with remote packet");
+static_assert(sizeof(history_request_t) != sizeof(ota_ack_t), "history request collides with OTA ack");
+static_assert(sizeof(history_response_t) != sizeof(ota_chunk_t), "history response collides with OTA chunk");
+static_assert(sizeof(history_response_t) != sizeof(display_state_t), "history response collides with display state");
+static_assert(sizeof(history_response_t) != sizeof(ota_offer_t), "history response collides with OTA offer");
 #endif
 
 // ============================================================
