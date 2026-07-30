@@ -531,14 +531,20 @@ typedef struct __attribute__((packed)) {
 #define HIST_METRIC_BATT_CURRENT 3
 #define HIST_METRIC_BATT_VOLTAGE 4
 
-// 7 bytes — distinct from every other hub-inbound length (4/5/6/8/10/47).
+// 9 bytes — distinct from every other hub-inbound length (4/5/6/7/8/10/47).
 typedef struct __attribute__((packed)) {
-    uint8_t magic[2];          // PROBE_MAGIC_0, PROBE_MAGIC_1
-    uint8_t type;              // HIST_MSG_REQUEST
-    uint8_t metric_idx;        // HIST_METRIC_* — named, not positional
-    uint8_t window;            // HIST_WINDOW_*
-    uint8_t n_points;          // requested, clamped to HISTORY_MAX_POINTS
-    uint8_t sequence;          // rolling, for dedup
+    uint8_t  magic[2];         // PROBE_MAGIC_0, PROBE_MAGIC_1
+    uint8_t  type;             // HIST_MSG_REQUEST
+    uint8_t  metric_idx;       // HIST_METRIC_* — named, not positional
+    uint8_t  window;           // HIST_WINDOW_*
+    uint8_t  n_points;         // requested, clamped to HISTORY_MAX_POINTS
+    uint8_t  sequence;         // rolling, for dedup
+    // Pages back through time, in whole screenfuls: 0 is the most recent
+    // n_points buckets, 1 the n_points before those, and so on. Paging in
+    // screenfuls rather than by an arbitrary sample index keeps every page
+    // aligned to the same bucket boundaries, so a column means the same
+    // hour or day however far back the user has walked.
+    uint16_t page_back;
 } history_request_t;
 
 // 217 bytes, fixed even when n_points < 200, preserving length-dispatch.
@@ -574,7 +580,7 @@ static inline int16_t history_point_to_value(uint8_t p, int16_t vmin, int16_t vm
 //   4  = channel_probe_t      (any device → hub)
 //   5  = remote_packet_t      (remote → hub)
 //   6  = display_request_t    (display → hub, v0.06+)
-//   7  = history_request_t    (display → hub)
+//   9  = history_request_t    (display → hub)
 //   8  = sensor_v2_packet_t   (sensor → hub)
 // Device RX dispatch by length:
 //   3  = hub_response_t       (hub → any device)
@@ -596,7 +602,7 @@ static_assert(sizeof(ota_request_t)      == 47, "ota_request_t must stay 47 byte
 static_assert(sizeof(ota_offer_t)        == 44, "ota_offer_t must stay 44 bytes (device RX length-dispatch)");
 static_assert(sizeof(ota_chunk_t)        == 208, "ota_chunk_t must stay 208 bytes (device RX length-dispatch)");
 static_assert(sizeof(ota_ack_t)          == 10, "ota_ack_t must stay 10 bytes (hub RX length-dispatch)");
-static_assert(sizeof(history_request_t)  ==  7, "history_request_t must stay 7 bytes (hub RX length-dispatch)");
+static_assert(sizeof(history_request_t)  ==  9, "history_request_t must stay 9 bytes (hub RX length-dispatch)");
 static_assert(sizeof(history_response_t) == 217, "history_response_t must stay 217 bytes (device RX length-dispatch)");
 
 // Every dispatch length must be unique within its direction, or packets
@@ -611,6 +617,7 @@ static_assert(sizeof(history_request_t) != sizeof(sensor_v2_packet_t), "history 
 static_assert(sizeof(history_request_t) != sizeof(display_request_t), "history request collides with display request");
 static_assert(sizeof(history_request_t) != sizeof(remote_packet_t), "history request collides with remote packet");
 static_assert(sizeof(history_request_t) != sizeof(ota_ack_t), "history request collides with OTA ack");
+static_assert(sizeof(history_request_t) != sizeof(probe_response_t), "history request collides with probe response");
 static_assert(sizeof(history_response_t) != sizeof(ota_chunk_t), "history response collides with OTA chunk");
 static_assert(sizeof(history_response_t) != sizeof(display_state_t), "history response collides with display state");
 static_assert(sizeof(history_response_t) != sizeof(ota_offer_t), "history response collides with OTA offer");
