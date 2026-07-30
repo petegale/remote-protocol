@@ -365,7 +365,13 @@ typedef struct __attribute__((packed)) {
     struct {
         uint8_t fluid_type;         // DISPLAY_FLUID_*
         uint8_t level_pct;          // 0..100, or DISPLAY_LEVEL_NO_DATA
-        uint8_t reserved[2];        // future expansion (capacity, etc.)
+        // Tank capacity in litres, or 0 when unknown. Occupies the two
+        // bytes previously reserved, so display_state_t stays 30 bytes and
+        // length-dispatch is untouched — a display that predates this simply
+        // ignores them. Carried because a level percentage alone cannot
+        // answer "how much fuel per hour", which is the question a rate-of-
+        // change chart exists to answer.
+        uint16_t capacity_l;
     } tanks[MAX_DISPLAY_TANKS];     // = 4 × 2 = 8 bytes
     // House battery (v0.07) — from the hub's Victron BLE listener.
     uint8_t     batt_soc_pct;       // 0..100 true SoC, or DISPLAY_BATT_NO_DATA
