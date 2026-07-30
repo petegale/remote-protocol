@@ -539,12 +539,14 @@ typedef struct __attribute__((packed)) {
     uint8_t  window;           // HIST_WINDOW_*
     uint8_t  n_points;         // requested, clamped to HISTORY_MAX_POINTS
     uint8_t  sequence;         // rolling, for dedup
-    // Pages back through time, in whole screenfuls: 0 is the most recent
-    // n_points buckets, 1 the n_points before those, and so on. Paging in
-    // screenfuls rather than by an arbitrary sample index keeps every page
-    // aligned to the same bucket boundaries, so a column means the same
-    // hour or day however far back the user has walked.
-    uint16_t page_back;
+    // How many buckets back the right-hand edge sits: 0 is live, 12 shifts
+    // the view twelve columns into the past. Counted in buckets rather than
+    // whole screens so a client can overlap successive views — stepping by a
+    // half screen keeps recognisable features on the chart as the user walks
+    // back, where a full-screen jump replaces every column at once and gives
+    // nothing to navigate by. Still whole buckets, so columns stay aligned to
+    // the same boundaries however far back the view has moved.
+    uint16_t offset_buckets;
 } history_request_t;
 
 // 217 bytes, fixed even when n_points < 200, preserving length-dispatch.
