@@ -252,6 +252,14 @@ static inline espnow_action_t espnow_client_tick(espnow_client_t* c, bool wantSe
         if (++c->sweepTried >= span) {
             // Whole sweep, no answer. Report once, then keep sweeping —
             // giving up entirely would need a human to notice.
+            //
+            // This counts as another sweep. It is tempting to treat `sweeps`
+            // as "times we started looking", but the counter exists to size
+            // an outage from a device's own log, and leaving it at 1 through
+            // an hour of continuous sweeping reports the opposite of what
+            // happened. Observed on the 4.3B: a two-minute outage logged
+            // "sweeps=1" against roughly eighty actual sweeps.
+            c->sweeps++;
             c->sweepTried = 0;
             c->phase      = ESPNOW_PH_SWEEP_DROP;
             c->phaseAtMs  = c->nowMs;
