@@ -82,7 +82,15 @@ typedef struct {
     uint8_t  chMin, chMax;      // inclusive sweep range
     uint16_t listenMs;          // per-channel wait for a reply
     uint8_t  txFailLimit;       // consecutive failures before re-sweeping
-    uint32_t linkTimeoutMs;     // silence after which the link counts as lost
+    // Silence after which the link counts as lost. ZERO DISABLES IT, which is
+    // only correct for a device the hub does not routinely answer: measuring
+    // silence requires something to be silent. The sensor node is in that
+    // position — the hub replies to a reading only when it has an UPDATE or
+    // UNPAIR flag to deliver — so it has no inbound traffic to time out on and
+    // must rely on TX failures alone. That is a real gap, not a preference:
+    // TX failures cannot see a hub that ACKs at the MAC layer and discards
+    // above it, which is precisely the failure that took days to find.
+    uint32_t linkTimeoutMs;
 } espnow_cfg_t;
 
 typedef struct {
@@ -133,6 +141,29 @@ static inline void espnow_client_restore(espnow_client_t* c, const uint8_t mac[6
     c->haveHub = true;
     if (lmk) { memcpy(c->hubLmk, lmk, 16); c->haveLmk = true; }
     c->channel = channel;
+}
+
+// Treat a restored pairing as live and start transmitting immediately, letting
+// TX failures prove otherwise. This is transport policy, not a shortcut: a
+// mains display can afford to prove the link on every boot, while a battery
+// node sweeping thirteen channels on each wake spends more energy confirming
+// what NVS already said than it does reporting. It does NOT prove anything —
+// call it only where losing the first few sends is cheaper than the sweep.
+// Requires a restored MAC; without one there is nothing to assume.
+static inline void espnow_client_assume_linked(espnow_client_t* c) {
+    if (!c->haveHub) return;
+    c->phase     = ESPNOW_PH_LINKED;
+    c->phaseAtMs = c->nowMs;
+    c->lastRxMs  = c->nowMs;
+    c->txFails   = 0;
+}
+
+// Abandon the current link and sweep again. For devices with their own reason
+// to distrust the link — an external "hub moved" signal, or a caller-owned
+// backoff timer deciding it is time for another attempt.
+static inline void espnow__begin_sweep(espnow_client_t* c);
+static inline void espnow_client_force_sweep(espnow_client_t* c) {
+    espnow__begin_sweep(c);
 }
 
 // ─── Events ─────────────────────────────────────────────────────────────────
@@ -294,7 +325,7 @@ static inline espnow_action_t espnow_client_tick(espnow_client_t* c, bool wantSe
         // ACKing at the MAC layer while discarding everything above it, which
         // no transmitter can detect any other way.
         if (c->txFails >= k->txFailLimit ||
-            (c->nowMs - c->lastRxMs) > k->linkTimeoutMs) {
+            (k->linkTimeoutMs && (c->nowMs - c->lastRxMs) > k->linkTimeoutMs)) {
             espnow__begin_sweep(c);
             return espnow_client_tick(c, wantSend);
         }
