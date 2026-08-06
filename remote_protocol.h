@@ -378,8 +378,22 @@ typedef struct __attribute__((packed)) {
     uint8_t     batt_flags;         // DISPLAY_BATT_FLAG_* bitmask
     int16_t     batt_current_dA;    // deciamps; + = charging, − = discharging
     uint16_t    batt_voltage_cV;    // centivolts (1261 = 12.61 V)
-    uint8_t     reserved[2];        // pad to 30 bytes (length-dispatch
-                                    // distinct from probe_response_t=20)
+    // Per-sensor link quality: two bits per tank slot, in the same order as
+    // tanks[] above. Pack and unpack with espnow_sig_pack/unpack — never by
+    // hand, because a slot read from the wrong offset resites the wrong
+    // sensor and nothing about the result looks incorrect.
+    //
+    // Two bits rather than a dBm per sensor because only these two reserved
+    // bytes were left. Four dBm values would have grown the struct, changed
+    // its length, and broken the hub's length-based dispatch for every device
+    // not reflashed at the same instant. Bars are what gets drawn, so nothing
+    // that would have been shown is lost.
+    //
+    // A hub that predates this sends zero, which unpacks to ESPNOW_SIG_NONE
+    // for every slot — "no reading", which is exactly right.
+    uint8_t     sensor_sig;
+    uint8_t     reserved[1];        // pad (length-dispatch distinct from
+                                    // probe_response_t=20)
 } display_state_t;
 
 // ============================================================
