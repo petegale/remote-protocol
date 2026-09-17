@@ -76,6 +76,7 @@ typedef enum {
     ESPNOW_PH_LOCK_ADD_PEER,
     ESPNOW_PH_LINKED,
     ESPNOW_PH_UNPAIR_DEL,       // delete the peer before forgetting the MAC
+    ESPNOW_PH_SWEEP_PAUSE,      // idling between exhausted sweeps
 } espnow_phase_t;
 
 typedef struct {
@@ -91,6 +92,16 @@ typedef struct {
     // TX failures cannot see a hub that ACKs at the MAC layer and discards
     // above it, which is precisely the failure that took days to find.
     uint32_t linkTimeoutMs;
+    // Idle time between one exhausted sweep and the next. 0 sweeps
+    // continuously, which is what every device did before this existed.
+    //
+    // It matters most for a device that never sleeps. An unpaired 4.3B was
+    // measured broadcasting probes at roughly three a second indefinitely:
+    // 600 frames in three minutes, none of which could be answered because
+    // the hub was not in pairing mode. A mains display should still recover
+    // quickly, so this is a flat pause rather than the escalating backoff a
+    // battery node wants — the cost of looking is airtime, not charge.
+    uint32_t sweepPauseMs;
 } espnow_cfg_t;
 
 typedef struct {
@@ -277,6 +288,14 @@ static inline espnow_action_t espnow_client_tick(espnow_client_t* c, bool wantSe
         c->phaseAtMs = c->nowMs;
         return ESPNOW_ACT_SEND_PROBE;
 
+    case ESPNOW_PH_SWEEP_PAUSE:
+        // Deliberately still "searching" to any caller reading the phase: the
+        // link is down, we are simply not shouting about it this instant.
+        if (inPhase < k->sweepPauseMs) return ESPNOW_ACT_NONE;
+        c->phase     = ESPNOW_PH_SWEEP_DROP;
+        c->phaseAtMs = c->nowMs;
+        return ESPNOW_ACT_NONE;
+
     case ESPNOW_PH_SWEEP_WAIT: {
         if (inPhase < k->listenMs) return ESPNOW_ACT_NONE;
         const uint8_t span = (uint8_t)(k->chMax - k->chMin + 1);
@@ -292,7 +311,8 @@ static inline espnow_action_t espnow_client_tick(espnow_client_t* c, bool wantSe
             // "sweeps=1" against roughly eighty actual sweeps.
             c->sweeps++;
             c->sweepTried = 0;
-            c->phase      = ESPNOW_PH_SWEEP_DROP;
+            c->phase      = k->sweepPauseMs ? ESPNOW_PH_SWEEP_PAUSE
+                                            : ESPNOW_PH_SWEEP_DROP;
             c->phaseAtMs  = c->nowMs;
             return ESPNOW_ACT_REPORT_LOST;
         }
