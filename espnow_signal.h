@@ -40,6 +40,12 @@ typedef enum {
 
 // Level boundaries in dBm. ESP-NOW keeps working down to roughly -90, so
 // "none" here means the link is at the edge rather than merely poor.
+//
+// THESE THREE NUMBERS ARE DUPLICATED IN sensor_hub/ui/src/signal.ts, because
+// the phone renders bars from a dBm figure and cannot include a C header.
+// Change one and you must change the other; signal.test.ts asserts the
+// values, so a later drift fails the UI suite rather than showing a boat two
+// devices whose identical signal reads as different strengths.
 #define ESPNOW_SIG_GOOD_DBM (-60)
 #define ESPNOW_SIG_OK_DBM   (-75)
 #define ESPNOW_SIG_WEAK_DBM (-88)
