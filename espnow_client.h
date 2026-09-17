@@ -79,6 +79,12 @@ typedef enum {
     ESPNOW_PH_SWEEP_PAUSE,      // idling between exhausted sweeps
 } espnow_phase_t;
 
+// ZERO-INITIALISE THIS (`espnow_cfg_t cfg = {};`) and then set what you need.
+// Fields get added here, and a bare declaration leaves the new ones holding
+// stack garbage — which is a behaviour change in a caller that was never
+// touched, appearing only on whichever build happens to have dirty stack.
+// That has already happened once, to the test suite, the day sweepPauseMs
+// was added.
 typedef struct {
     uint8_t  chMin, chMax;      // inclusive sweep range
     uint16_t listenMs;          // per-channel wait for a reply
